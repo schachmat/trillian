@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -28,10 +29,10 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/google/trillian"
 	spb "github.com/google/trillian/crypto/sigpb"
-	"github.com/google/trillian/monitoring/metric"
 	"github.com/google/trillian/storage"
 	"github.com/google/trillian/storage/cache"
 	"github.com/google/trillian/trees"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 const (
@@ -78,14 +79,38 @@ const (
 
 	// Error code returned by driver when inserting a duplicate row
 	errNumDuplicate = 1062
+
+	logIDLabel = "logid"
 )
 
 var (
 	defaultLogStrata = []int{8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8}
 
-	queuedCounter   = metric.NewCounter("mysql_queued_leaves")
-	dequeuedCounter = metric.NewCounter("mysql_dequeued_leaves")
+	queuedCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "mysql_queued_leaves",
+			Help: "Number of leaves queued",
+		},
+		[]string{logIDLabel},
+	)
+	dequeuedCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "mysql_dequeued_leaves",
+			Help: "Number of leaves dequeued",
+		},
+		[]string{logIDLabel},
+	)
 )
+
+func init() {
+	// Register metrics so they get exposed.
+	prometheus.MustRegister(queuedCounter)
+	prometheus.MustRegister(dequeuedCounter)
+}
+
+func labelsForTX(t *logTreeTX) prometheus.Labels {
+	return prometheus.Labels{logIDLabel: strconv.FormatInt(t.treeID, 10)}
+}
 
 type mySQLLogStorage struct {
 	*mySQLTreeStorage
@@ -316,7 +341,7 @@ func (t *logTreeTX) DequeueLeaves(ctx context.Context, limit int, cutoffTime tim
 		return nil, err
 	}
 
-	dequeuedCounter.Add(int64(len(leaves)))
+	dequeuedCounter.With(labelsForTX(t)).Add(float64(len(leaves)))
 
 	return leaves, nil
 }
@@ -367,9 +392,9 @@ func (t *logTreeTX) QueueLeaves(ctx context.Context, leaves []*trillian.LogLeaf,
 			return nil, fmt.Errorf("Unsequenced: %v", err)
 		}
 	}
+	queuedCounter.With(labelsForTX(t)).Add(float64(len(leaves)))
 
 	if existingCount == 0 {
-		queuedCounter.Add(int64(len(leaves)))
 		return existingLeaves, nil
 	}
 
@@ -405,7 +430,6 @@ func (t *logTreeTX) QueueLeaves(ctx context.Context, leaves []*trillian.LogLeaf,
 		}
 	}
 
-	queuedCounter.Add(int64(len(leaves)))
 	return existingLeaves, nil
 }
 

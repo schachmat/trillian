@@ -21,22 +21,47 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"time"
 
 	"github.com/google/btree"
 	"github.com/google/trillian"
-	"github.com/google/trillian/monitoring/metric"
 	"github.com/google/trillian/storage"
 	"github.com/google/trillian/storage/cache"
 	"github.com/google/trillian/trees"
+	"github.com/prometheus/client_golang/prometheus"
 )
+
+const logIDLabel = "logid"
 
 var (
 	defaultLogStrata = []int{8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8}
 
-	queuedCounter   = metric.NewCounter("mem_queued_leaves")
-	dequeuedCounter = metric.NewCounter("mem_dequeued_leaves")
+	queuedCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "mem_queued_leaves",
+			Help: "Number of leaves queued",
+		},
+		[]string{logIDLabel},
+	)
+	dequeuedCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "mem_dequeued_leaves",
+			Help: "Number of leaves dequeued",
+		},
+		[]string{logIDLabel},
+	)
 )
+
+func init() {
+	// Register metrics so they get exposed.
+	prometheus.MustRegister(queuedCounter)
+	prometheus.MustRegister(dequeuedCounter)
+}
+
+func labelsForTX(t *logTreeTX) prometheus.Labels {
+	return prometheus.Labels{logIDLabel: strconv.FormatInt(t.treeID, 10)}
+}
 
 func unseqKey(treeID int64) btree.Item {
 	return &kv{k: fmt.Sprintf("/%d/unseq", treeID)}
@@ -180,6 +205,7 @@ func (t *logTreeTX) DequeueLeaves(ctx context.Context, limit int, cutoffTime tim
 		e = e.Next()
 	}
 
+	dequeuedCounter.With(labelsForTX(t)).Add(float64(len(leaves)))
 	return leaves, nil
 }
 
@@ -190,6 +216,7 @@ func (t *logTreeTX) QueueLeaves(ctx context.Context, leaves []*trillian.LogLeaf,
 			return nil, fmt.Errorf("queued leaf must have a leaf ID hash of length %d", t.hashSizeBytes)
 		}
 	}
+	queuedCounter.With(labelsForTX(t)).Add(float64(len(leaves)))
 	// No deduping in this storage!
 	k := unseqKey(t.treeID)
 	q := t.tx.Get(k).(*kv).v.(*list.List)
